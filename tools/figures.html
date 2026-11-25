@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WFC Lab — figure generator</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=JetBrains+Mono:wght@400;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  body { background: #0b0d12; color: #ddd; font: 14px system-ui; margin: 20px; }
+  #log { font: 12px monospace; white-space: pre; }
+  .out img, .out canvas { max-width: 100%; display: block; margin: 12px 0 28px; border: 1px solid #333; }
+</style>
+</head>
+<body>
+<h1>Figure generator</h1>
+<p>Open with <code>?run=1</code> while <code>node tools/figure-server.js</code> is running. Images are saved to <code>docs/images/</code>.</p>
+<div id="log"></div>
+<div class="out" id="out"></div>
+<script src="../js/solver.js"></script>
+<script src="../js/village.js"></script>
+<script src="../js/render.js"></script>
+<script type="module">
+import { GIFEncoder, quantize, applyPalette } from 'https://cdn.jsdelivr.net/npm/gifenc@1.0.3/+esm';
+
+const V = WFC.Village;
+const { LAYOUT, DETAIL, D, SUB } = V;
+const logEl = document.getElementById('log');
+const log = s => { logEl.textContent += s + '\n'; console.log(s); };
+
+// ---------- 共通スタイル ----------
+const BG = '#11151d', CARD = '#1a2030', LINE = 'rgba(255,255,255,0.08)', TEXT = '#ece8df', MUTED = '#98a0ad',
+  ACC = '#ffcd6e', GOOD = '#7fd3a0', BAD = '#ff6b6b';
+const SANS = '"Zen Kaku Gothic New", system-ui, sans-serif', MONO = '"JetBrains Mono", ui-monospace, monospace', SERIF = '"Fraunces", Georgia, serif';
+const SOCK_COL = { R: '#d9b07a', s: '#8fa87e', G: '#6fbf4f', D: '#ff8a5c', o: '#7c8a99', x: '#b48cff', Le: ACC, M1w: ACC, M1e: GOOD, M2w: GOOD, M2e: '#6fc0ff', Rw: '#6fc0ff' };
+const FS = 2; // 図の出力倍率
+
+function rr(x, X, Y, W, H, r) {
+  x.beginPath(); x.moveTo(X + r, Y); x.arcTo(X + W, Y, X + W, Y + H, r); x.arcTo(X + W, Y + H, X, Y + H, r);
+  x.arcTo(X, Y + H, X, Y, r); x.arcTo(X, Y, X + W, Y, r); x.closePath();
+}
+function fig(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w * FS; c.height = h * FS;
+  const x = c.getContext('2d'); x.scale(FS, FS);
+  const g = x.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, '#151a24'); g.addColorStop(1, '#0f1218');
+  x.fillStyle = g; rr(x, 0, 0, w, h, 20); x.fill();
+  x.strokeStyle = LINE; x.lineWidth = 1; rr(x, 0.5, 0.5, w - 1, h - 1, 20); x.stroke();
+  return { c, x, w, h };
+}
+function text(x, s, X, Y, o = {}) {
+  x.font = `${o.weight || 500} ${o.size || 14}px ${o.font || SANS}`;
+  x.fillStyle = o.color || TEXT; x.textAlign = o.align || 'left'; x.textBaseline = o.base || 'alphabetic';
+  x.fillText(s, X, Y);
+  return x.measureText(s).width;
+}
+function header(F, num, title, sub) {
+  const { x } = F;
+  text(x, num, 28, 46, { font: MONO, size: 13, color: ACC, weight: 600 });
+  text(x, title, 28 + 34, 46, { font: SERIF, size: 24, weight: 800 });
+  if (sub) text(x, sub, 28, 70, { size: 13.5, color: MUTED });
+}
+function badge(x, s, X, Y, col, o = {}) {
+  x.font = `600 ${o.size || 12}px ${MONO}`;
+  const w = Math.max(o.min || 20, x.measureText(s).width + 12), h = (o.size || 12) + 9;
+  x.fillStyle = 'rgba(12,14,20,0.88)'; rr(x, X - w / 2, Y - h / 2, w, h, h / 2); x.fill();
+  x.strokeStyle = col; x.lineWidth = 1.5; rr(x, X - w / 2, Y - h / 2, w, h, h / 2); x.stroke();
+  x.fillStyle = col; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(s, X, Y + 0.5);
+}
+function mark(x, ok, X, Y, r = 16) {
+  x.fillStyle = ok ? GOOD : BAD; x.beginPath(); x.arc(X, Y, r, 0, 6.29); x.fill();
+  x.strokeStyle = '#10141c'; x.lineWidth = r * 0.22; x.lineCap = 'round'; x.beginPath();
+  if (ok) { x.moveTo(X - r * 0.42, Y); x.lineTo(X - r * 0.1, Y + r * 0.32); x.lineTo(X + r * 0.45, Y - r * 0.35); }
+  else { x.moveTo(X - r * 0.35, Y - r * 0.35); x.lineTo(X + r * 0.35, Y + r * 0.35); x.moveTo(X + r * 0.35, Y - r * 0.35); x.lineTo(X - r * 0.35, Y + r * 0.35); }
+  x.stroke(); x.lineCap = 'butt';
+}
+function arrow(x, X1, Y1, X2, Y2, col = ACC) {
+  x.strokeStyle = col; x.fillStyle = col; x.lineWidth = 2;
+  x.beginPath(); x.moveTo(X1, Y1); x.lineTo(X2, Y2); x.stroke();
+  const a = Math.atan2(Y2 - Y1, X2 - X1);
+  x.beginPath(); x.moveTo(X2, Y2); x.lineTo(X2 - 9 * Math.cos(a - 0.45), Y2 - 9 * Math.sin(a - 0.45));
+  x.lineTo(X2 - 9 * Math.cos(a + 0.45), Y2 - 9 * Math.sin(a + 0.45)); x.fill();
+}
+function image(x, src, sx, sy, sw, sh, X, Y, W, H, r = 10) {
+  x.save(); rr(x, X, Y, W, H, r); x.clip();
+  x.drawImage(src, sx, sy, sw, sh, X, Y, W, H);
+  x.restore();
+  x.strokeStyle = 'rgba(0,0,0,0.5)'; x.lineWidth = 1; rr(x, X + 0.5, Y + 0.5, W - 1, H - 1, r); x.stroke();
+}
+// renderer キャンバスを論理座標で切り抜いて描く
+function crop(x, r, lx, ly, lw, lh, X, Y, W, H, rad) {
+  image(x, r.canvas, lx * r.dpr, ly * r.dpr, lw * r.dpr, lh * r.dpr, X, Y, W, H, rad);
+}
+
+// ---------- WFC ヘルパー ----------
+const keyIdx = k => LAYOUT.findIndex(m => m.key === k);
+function makeR(W, H, C, seed, dpr) { const r = new WFC.Renderer(document.createElement('canvas')); r.setup(W, H, C, seed, dpr); r.optSuffix = ' opt'; return r; }
+function fullVillage(seed, W, H) {
+  const lj = new V.LayoutJob(seed, W, H); lj.runToEnd();
+  const mods = lj.modules();
+  const dj = new V.DetailJob(mods, W, H, lj.solver.firstHouse, seed * 31 + 7); dj.runToEnd();
+  return { lj, dj, mods };
+}
+function layoutTo(seed, W, H, picks) {
+  const lj = new V.LayoutJob(seed, W, H);
+  while (lj.solver.steps < picks) { const s = lj.step(); if (s === 'done' || s === 'failed') break; }
+  return lj;
+}
+function sceneOf(lj, dj) {
+  return {
+    layout: lj.solver, layoutMods: lj.modules(), layoutDone: lj.solver.done,
+    detail: dj ? dj.solver : null, detailMods: dj ? dj.modules() : null, detailDone: dj ? dj.solver.done : false,
+  };
+}
+function sceneMods(mods) { return { layoutMods: Int16Array.from(mods), layoutDone: true }; }
+const OPT = { overlay: 'options', showDetails: true, night: false, spotGrid: false, cellGrid: false, ambient: false };
+function shot(r, sc, o = {}) {
+  const opt = Object.assign({}, OPT, o);
+  r.night = opt.night ? 1 : 0; r.particles = []; r.lastT = undefined; r.lastEmit = 0;
+  r.renderStatic(sc, opt);
+  let t = 10000;
+  for (let i = 0; i < (o.frames || 1); i++) { r.frame(t, opt, o.highlight ? Object.assign({}, o.highlight, { time: t - 120 }) : null); t += 50; }
+  return r.canvas;
+}
+function hl(r, cell, W, bad) { return { x: (cell % W) * r.C, y: ((cell / W) | 0) * r.C, size: r.C, bad }; }
+
+// ---------- 保存 ----------
+async function save(name, canvas, type, q) {
+  // 図は WebP（アルファ付き・高画質）で軽く保存する
+  if (!type && name.endsWith('.png')) { name = name.replace(/\.png$/, '.webp'); type = 'image/webp'; q = 0.9; }
+  const blob = canvas instanceof Blob ? canvas : await new Promise(res => canvas.toBlob(res, type, q));
+  await fetch('/save?name=' + name, { method: 'POST', body: blob });
+  const img = document.createElement('img'); img.src = URL.createObjectURL(blob); img.title = name;
+  document.getElementById('out').append(Object.assign(document.createElement('div'), { textContent: name }), img);
+  log(`✔ ${name}  ${(blob.size / 1024).toFixed(0)} KB`);
+}
+
+// =====================================================================
+// 1. ヒーロー（昼・夜）
+// =====================================================================
+async function figHero() {
+  const v = fullVillage(2026, 18, 12);
+  const r = makeR(18, 12, 48, 2026, 1.5);
+  await save('hero.jpg', shot(r, sceneOf(v.lj, v.dj), { ambient: true, frames: 90 }), 'image/jpeg', 0.9);
+  await save('hero-night.jpg', shot(r, sceneOf(v.lj, v.dj), { ambient: true, frames: 90, night: true }), 'image/jpeg', 0.9);
+}
+
+// =====================================================================
+// 2. ギャラリー
+// =====================================================================
+async function figGallery() {
+  const seeds = [[11, false], [42, true], [314, false], [8080, false]];
+  const W = 12, H = 9, C = 40, pw = W * C, ph = H * C, gap = 14;
+  const c = document.createElement('canvas');
+  const s = 1.5;
+  c.width = (pw * 2 + gap * 3) * s; c.height = (ph * 2 + gap * 3) * s;
+  const x = c.getContext('2d'); x.scale(s, s);
+  x.fillStyle = '#11151d'; x.fillRect(0, 0, c.width, c.height);
+  for (let k = 0; k < 4; k++) {
+    const [seed, night] = seeds[k];
+    const v = fullVillage(seed, W, H);
+    const r = makeR(W, H, C, seed, 1.5);
+    shot(r, sceneOf(v.lj, v.dj), { ambient: true, frames: 80, night });
+    const X = gap + (k % 2) * (pw + gap), Y = gap + ((k / 2) | 0) * (ph + gap);
+    image(x, r.canvas, 0, 0, r.canvas.width, r.canvas.height, X, Y, pw, ph, 10);
+    badge(x, `seed ${seed}${night ? ' · night' : ''}`, X + 62, Y + 20, ACC, { size: 11 });
+  }
+  await save('gallery.jpg', c, 'image/jpeg', 0.88);
+}
+
+// =====================================================================
+// 3. モジュールとソケット
+// =====================================================================
+async function figModules() {
+  const C = 104, cols = 7, cw = 158, chh = 236, gap = 12, pad = 28, top = 92;
+  const F = fig(pad * 2 + cols * cw + (cols - 1) * gap, top + 2 * chh + gap + 96);
+  header(F, '01', 'Layout modules & sockets', '14 modules. Each side carries one socket label; neighbours must form an allowed pair.');
+  const r = makeR(3, 3, C, 5, 2);
+  const mods = new Int16Array(9).fill(-1);
+  for (let m = 0; m < LAYOUT.length; m++) {
+    mods[4] = m;
+    shot(r, sceneMods(mods));
+    const X = pad + (m % cols) * (cw + gap), Y = top + ((m / cols) | 0) * (chh + gap);
+    const { x } = F;
+    x.fillStyle = CARD; rr(x, X, Y, cw, chh, 14); x.fill();
+    const tx = X + (cw - 112) / 2, ty = Y + 14, over = 0.28 * C * 112 / C;
+    crop(x, r, C - 4, C - 0.28 * C, C + 8, C * 1.28 + 4, tx, ty, 112, 112 * (C * 1.28 + 4) / (C + 8), 10);
+    // セル境界
+    const s = 112 / (C + 8), cx0 = tx + 4 * s, cy0 = ty + 0.28 * C * s, cs = C * s;
+    x.setLineDash([4, 4]); x.strokeStyle = 'rgba(255,255,255,0.55)'; x.lineWidth = 1;
+    x.strokeRect(cx0, cy0, cs, cs); x.setLineDash([]);
+    const sk = LAYOUT[m].sockets;
+    badge(x, sk[0], cx0 + cs / 2, cy0, SOCK_COL[sk[0]]);
+    badge(x, sk[1], cx0 + cs, cy0 + cs / 2, SOCK_COL[sk[1]]);
+    badge(x, sk[2], cx0 + cs / 2, cy0 + cs, SOCK_COL[sk[2]]);
+    badge(x, sk[3], cx0, cy0 + cs / 2, SOCK_COL[sk[3]]);
+    const mod = LAYOUT[m];
+    const label = mod.kind === 'road' ? `road ${mod.key.slice(5)}` : mod.key;
+    text(x, label, X + cw / 2, Y + chh - 42, { align: 'center', size: 14, weight: 700 });
+    text(x, mod.kind === 'road' ? `0.3 × ${({ straight: 1.4, corner: 0.7, tee: 0.3, cross: 0.08 })[mod.shape]} = ${mod.weight.toFixed(3)}` : `weight ${mod.weight.toFixed(1)}`,
+      X + cw / 2, Y + chh - 20, { align: 'center', size: 12, font: MONO, color: ACC });
+  }
+  // 凡例
+  const { x } = F, ly = top + 2 * chh + gap + 40;
+  text(x, 'Sockets', pad, ly, { size: 13, color: MUTED, weight: 700 });
+  const legend = [['R', 'road'], ['s', 'roadside'], ['G', 'grass'], ['D', 'door']];
+  let lx = pad + 76;
+  for (const [k, n] of legend) { badge(x, k, lx, ly - 5, SOCK_COL[k]); lx += 18 + text(x, n, lx + 16, ly, { size: 13 }) + 22; }
+  text(x, 'Allowed pairs', lx + 20, ly, { size: 13, color: MUTED, weight: 700 });
+  lx += 130;
+  for (const [a, b] of V.LAYOUT_PAIRS) { badge(x, `${a}–${b}`, lx + 24, ly - 5, TEXT, { min: 48 }); lx += 60; }
+  text(x, 'No dead-end road pieces → roads loop or leave the map. Houses are banned from the bottom row (unary rule).', pad, ly + 34, { size: 12.5, color: MUTED });
+  await save('modules.png', F.c);
+}
+
+// =====================================================================
+// 4. 隣接ルールの例
+// =====================================================================
+async function figAdjacency() {
+  const C = 96;
+  const ex = [
+    { a: 'road_EW', b: 'road_EW', dir: 'h', ok: true, pair: 'R – R', note: 'roads connect' },
+    { a: 'house', b: 'road_NS', dir: 'v', ok: true, pair: 'D – R', note: 'door opens onto a road' },
+    { a: 'tree', b: 'road_NS', dir: 'h', ok: true, pair: 'G – s', note: 'grass next to roadside' },
+    { a: 'road_EW', b: 'grass', dir: 'h', ok: false, pair: 'R – G', note: 'road can\'t end in grass' },
+    { a: 'house', b: 'grass', dir: 'v', ok: false, pair: 'D – G', note: 'door must face a road' },
+  ];
+  const cw = 236, chh = 330, gap = 14, pad = 28, top = 92;
+  const F = fig(pad * 2 + ex.length * cw + (ex.length - 1) * gap, top + chh + 28);
+  header(F, '02', 'Adjacency = socket pairs', 'compat[dir][m] is precomputed from the pair list, so propagation is just bitwise AND / OR.');
+  const r = makeR(4, 4, C, 9, 2);
+  for (let k = 0; k < ex.length; k++) {
+    const e = ex[k], X = pad + k * (cw + gap), Y = top, { x } = F;
+    x.fillStyle = CARD; rr(x, X, Y, cw, chh, 14); x.fill();
+    const mods = new Int16Array(16).fill(-1);
+    mods[1 * 4 + 1] = keyIdx(e.a);
+    mods[e.dir === 'h' ? 1 * 4 + 2 : 2 * 4 + 1] = keyIdx(e.b);
+    shot(r, sceneMods(mods));
+    const lw = e.dir === 'h' ? 2 * C : C, lh = (e.dir === 'h' ? C : 2 * C) + 0.3 * C;
+    const scale = Math.min((cw - 36) / lw, 220 / lh);
+    const W = lw * scale, H = lh * scale, ix = X + (cw - W) / 2, iy = Y + 18 + (226 - H) / 2;
+    crop(x, r, C, C - 0.3 * C, lw, lh, ix, iy, W, H, 8);
+    const cs = C * scale, oy = iy + 0.3 * C * scale;
+    x.setLineDash([4, 4]); x.strokeStyle = 'rgba(255,255,255,0.5)';
+    x.strokeRect(ix, oy, cs, cs);
+    if (e.dir === 'h') x.strokeRect(ix + cs, oy, cs, cs); else x.strokeRect(ix, oy + cs, cs, cs);
+    x.setLineDash([]);
+    const [sa, sb] = e.pair.split(' – ');
+    if (e.dir === 'h') { badge(x, sa, ix + cs - 16, oy + cs / 2, SOCK_COL[sa]); badge(x, sb, ix + cs + 16, oy + cs / 2, SOCK_COL[sb]); }
+    else { badge(x, sa, ix + cs / 2, oy + cs - 14, SOCK_COL[sa]); badge(x, sb, ix + cs / 2, oy + cs + 14, SOCK_COL[sb]); }
+    if (!e.ok) { x.fillStyle = 'rgba(255,60,60,0.16)'; rr(x, ix, iy, W, H, 8); x.fill(); }
+    mark(x, e.ok, X + cw - 26, Y + 26, 14);
+    text(x, e.pair, X + cw / 2, Y + chh - 46, { align: 'center', font: MONO, size: 18, weight: 600, color: e.ok ? GOOD : BAD });
+    text(x, e.note, X + cw / 2, Y + chh - 22, { align: 'center', size: 13, color: MUTED });
+  }
+  await save('adjacency.png', F.c);
+}
+
+// =====================================================================
+// 5. 観測 → 伝播のステップ
+// =====================================================================
+async function figSteps() {
+  const seed = 7, W = 12, H = 9, C = 40;
+  const total = (() => { const lj = new V.LayoutJob(seed, W, H); lj.runToEnd(); return lj.solver.steps; })();
+  const picks = [1, Math.round(total * 0.12), Math.round(total * 0.42), Math.round(total * 0.8)];
+  const pw = W * C, ph = H * C, gap = 18, pad = 28, top = 92, capH = 62;
+  const F = fig(pad * 2 + pw * 2 + gap, top + (ph + capH) * 2 + gap + 8);
+  header(F, '03', 'Observe → propagate, frontier first', 'Each open cell shows its remaining modules. Gold outline = frontier (next candidates). Pulse = last pick.');
+  const r = makeR(W, H, C, seed, 2);
+  const capt = [
+    'forced first move: a house in one of the 4 middle cells',
+    'only frontier cells compete → the village grows as one blob',
+    'roads keep linking up: every R socket must meet an R or a door',
+    'cells reduced to 1 option are decided without being picked',
+  ];
+  for (let k = 0; k < 4; k++) {
+    const lj = layoutTo(seed, W, H, picks[k]);
+    const s = lj.solver;
+    shot(r, sceneOf(lj), { highlight: hl(r, s.last.cell, W) });
+    const X = pad + (k % 2) * (pw + gap), Y = top + ((k / 2) | 0) * (ph + capH + gap);
+    crop(F.x, r, 0, 0, pw, ph, X, Y, pw, ph, 10);
+    let open = 0; for (let i = 0; i < s.N; i++) if (!s.decided[i]) open++;
+    const L = s.last;
+    text(F.x, `step ${L.step}`, X, Y + ph + 24, { font: MONO, size: 15, weight: 600, color: ACC });
+    text(F.x, `picked ${LAYOUT[L.module].key}  H=${L.entropy.toFixed(2)}  ${L.options}→1   decided ${s.decidedCount}/${s.N}`, X + 86, Y + ph + 24, { font: MONO, size: 12, color: TEXT });
+    text(F.x, capt[k], X, Y + ph + 46, { size: 13, color: MUTED });
+  }
+  await save('steps.png', F.c);
+}
+
+// =====================================================================
+// 6. 可視化モード（候補 / エントロピー）
+// =====================================================================
+async function figOverlays() {
+  const seed = 7, W = 12, H = 9, C = 48;
+  const total = (() => { const lj = new V.LayoutJob(seed, W, H); lj.runToEnd(); return lj.solver.steps; })();
+  const lj = layoutTo(seed, W, H, Math.round(total * 0.3));
+  const s = lj.solver;
+  const pw = W * C * 0.92, ph = H * C * 0.92, gap = 20, pad = 28, top = 92;
+  const F = fig(pad * 2 + pw * 2 + gap, top + ph + 190);
+  header(F, '04', 'Seeing the wave: options & entropy', 'Same moment, two overlays. Low entropy (warm) cells are collapsed first.');
+  const r = makeR(W, H, C, seed, 2);
+  shot(r, sceneOf(lj), { overlay: 'options' });
+  crop(F.x, r, 0, 0, W * C, H * C, pad, top, pw, ph, 10);
+  // ズーム用に 1 セル選ぶ（フロンティアで候補 3〜8）
+  let zc = -1;
+  for (let i = 0; i < s.N; i++) { const n = WFC.popcount(s.domains[i]); if (!s.decided[i] && s.frontier[i] && n >= 3 && n <= 8) { zc = i; break; } }
+  const zx = (zc % W) * C, zy = ((zc / W) | 0) * C;
+  const zoomCanvas = document.createElement('canvas'); zoomCanvas.width = r.canvas.width; zoomCanvas.height = r.canvas.height;
+  zoomCanvas.getContext('2d').drawImage(r.canvas, 0, 0);
+  shot(r, sceneOf(lj), { overlay: 'entropy' });
+  crop(F.x, r, 0, 0, W * C, H * C, pad + pw + gap, top, pw, ph, 10);
+  const { x } = F;
+  text(x, 'overlay: options', pad, top + ph + 26, { font: MONO, size: 13, color: ACC, weight: 600 });
+  text(x, 'overlay: entropy  H = log Σw − Σ w·log w / Σw', pad + pw + gap, top + ph + 26, { font: MONO, size: 13, color: ACC, weight: 600 });
+  // 対応セルの印
+  x.strokeStyle = '#fff'; x.lineWidth = 2;
+  x.strokeRect(pad + zx * 0.92, top + zy * 0.92, C * 0.92, C * 0.92);
+  // ズームインセット
+  const iy = top + ph + 44, isz = 120;
+  image(x, zoomCanvas, zx * r.dpr, zy * r.dpr, C * r.dpr, C * r.dpr, pad, iy, isz, isz, 8);
+  const n = WFC.popcount(s.domains[zc]);
+  const names = []; for (let m = 0; m < LAYOUT.length; m++) if ((s.domains[zc] >> m) & 1) names.push(LAYOUT[m].key.replace('road_', 'road '));
+  text(x, `cell (${zc % W}, ${(zc / W) | 0}) — ${n} of 14 modules left`, pad + isz + 18, iy + 20, { size: 14, weight: 700 });
+  text(x, '4×4 icon grid = the 14 modules · bright = still possible · faded = eliminated by propagation', pad + isz + 18, iy + 44, { size: 12.5, color: MUTED });
+  text(x, names.join(', '), pad + isz + 18, iy + 68, { size: 12, font: MONO, color: TEXT });
+  text(x, `H = ${s.entropyOf(zc).toFixed(3)}  (+ noise 0..0.05 to break ties)`, pad + isz + 18, iy + 92, { size: 12, font: MONO, color: ACC });
+  // カラーバー
+  const bx = pad + pw + gap + pw - 260, by = iy + 10;
+  for (let i = 0; i < 240; i++) {
+    const t = i / 239, hue = 220 - (1 - t) * 190;
+    x.fillStyle = `hsl(${hue},70%,${22 + (1 - t) * 18}%)`; x.fillRect(bx + i, by, 1, 14);
+  }
+  text(x, 'low H (collapse next)', bx, by + 32, { size: 11.5, color: MUTED });
+  text(x, 'high H', bx + 240, by + 32, { size: 11.5, color: MUTED, align: 'right' });
+  await save('overlays.png', F.c);
+}
+
+// =====================================================================
+// 7. 地面パイプライン
+// =====================================================================
+async function figGround() {
+  const seed = 2026, W = 18, H = 12, C = 48;
+  const v = fullVillage(seed, W, H);
+  const r = makeR(W, H, C, seed, 2);
+  shot(r, sceneOf(v.lj, v.dj), { showDetails: false });
+  const cx0 = 6, cy0 = 3, cwn = 6, chn = 4;              // 切り抜くセル範囲
+  const gs = r.gs, gw = r.groundCanvas.width;
+  const px0 = Math.round(cx0 * C * gs), py0 = Math.round(cy0 * C * gs), pw = Math.round(cwn * C * gs), ph = Math.round(chn * C * gs);
+  const SW = W * SUB, SH = H * SUB, S = r.S, Dm = r.dirt;
+  const at = (x, y) => Dm[Math.min(SH - 1, Math.max(0, y)) * SW + Math.min(SW - 1, Math.max(0, x))];
+  const mk = () => { const c = document.createElement('canvas'); c.width = pw; c.height = ph; return c; };
+  // (1) スポットマスク
+  const c1 = mk(), x1 = c1.getContext('2d');
+  const sp = S * gs;
+  for (let gy = 0; gy < chn * SUB; gy++) for (let gx = 0; gx < cwn * SUB; gx++) {
+    x1.fillStyle = at(cx0 * SUB + gx, cy0 * SUB + gy) ? '#c79e68' : '#5f9a3f';
+    x1.fillRect(gx * sp, gy * sp, sp, sp);
+  }
+  x1.strokeStyle = 'rgba(0,0,0,0.25)'; x1.lineWidth = 1;
+  for (let i = 0; i <= cwn * SUB; i++) { x1.beginPath(); x1.moveTo(i * sp, 0); x1.lineTo(i * sp, ph); x1.stroke(); }
+  for (let i = 0; i <= chn * SUB; i++) { x1.beginPath(); x1.moveTo(0, i * sp); x1.lineTo(pw, i * sp); x1.stroke(); }
+  x1.strokeStyle = 'rgba(255,255,255,0.6)'; x1.lineWidth = 2;
+  for (let i = 0; i <= cwn; i++) { x1.beginPath(); x1.moveTo(i * C * gs, 0); x1.lineTo(i * C * gs, ph); x1.stroke(); }
+  for (let i = 0; i <= chn; i++) { x1.beginPath(); x1.moveTo(0, i * C * gs); x1.lineTo(pw, i * C * gs); x1.stroke(); }
+  // (2)(3) スカラー場
+  const c2 = mk(), c3 = mk();
+  const i2 = c2.getContext('2d').createImageData(pw, ph), i3 = c3.getContext('2d').createImageData(pw, ph);
+  for (let py = 0; py < ph; py++) for (let px = 0; px < pw; px++) {
+    const gx = px0 + px, gy = py0 + py, gi = gy * gw + gx;
+    const lx = gx / gs, ly = gy / gs, u = lx / S - 0.5, vv = ly / S - 0.5, ux = Math.floor(u), vy = Math.floor(vv);
+    let fx = u - ux, fy = vv - vy; fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+    const a = at(ux, vy), b = at(ux + 1, vy), c = at(ux, vy + 1), d = at(ux + 1, vy + 1);
+    const bil = a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+    const f = bil + (r.nMid[gi] - 0.5) * 0.34 + (r.nLow[gi] - 0.5) * 0.08;
+    const o = (py * pw + px) * 4;
+    const g = Math.round(30 + bil * 200);
+    i2.data[o] = g; i2.data[o + 1] = g * 0.95; i2.data[o + 2] = g * 0.85; i2.data[o + 3] = 255;
+    if (Math.abs(bil - 0.5) < 0.012) { i2.data[o] = 255; i2.data[o + 1] = 205; i2.data[o + 2] = 110; }
+    let col;
+    if (f > 0.5) col = f < 0.56 ? [110, 82, 51] : [199, 158, 104]; else col = f > 0.36 ? [70, 120, 50] : [95, 154, 63];
+    i3.data[o] = col[0]; i3.data[o + 1] = col[1]; i3.data[o + 2] = col[2]; i3.data[o + 3] = 255;
+  }
+  c2.getContext('2d').putImageData(i2, 0, 0); c3.getContext('2d').putImageData(i3, 0, 0);
+  // 合成
+  const dw = 400, dh = dw * ph / pw, gap = 60, pad = 28, top = 92;
+  const F = fig(pad * 2 + dw * 2 + gap, top + (dh + 70) * 2 + 20);
+  header(F, '05', 'Ground: spots → field → shape → texture', 'Roads are not tiles. A smooth scalar field is built from the 8px dirt spots, then shaded per pixel.');
+  const panels = [
+    [c1, '① dirt spots', 'road cells mark their centre 2×2 + connected arms'],
+    [c2, '② smoothstep-bilinear field', 'value at each pixel, interpolated from spot centres (gold = 0.5)'],
+    [c3, '③ + fBm noise, threshold 0.5', 'organic edges · rim band · ambient-occlusion band'],
+    [r.groundCanvas, '④ per-pixel texture', '3 noise octaves for tint, clumps, speckles'],
+  ];
+  panels.forEach(([src, t1, t2], k) => {
+    const X = pad + (k % 2) * (dw + gap), Y = top + ((k / 2) | 0) * (dh + 70 + 20);
+    if (src === r.groundCanvas) image(F.x, src, px0, py0, pw, ph, X, Y, dw, dh, 10);
+    else image(F.x, src, 0, 0, pw, ph, X, Y, dw, dh, 10);
+    text(F.x, t1, X, Y + dh + 26, { size: 15, weight: 700 });
+    text(F.x, t2, X, Y + dh + 48, { size: 12.5, color: MUTED });
+  });
+  arrow(F.x, pad + dw + 12, top + dh / 2, pad + dw + gap - 12, top + dh / 2);
+  arrow(F.x, pad + dw + gap / 2, top + dh + 62, pad + dw / 2 + 40, top + dh + 86);
+  arrow(F.x, pad + dw + 12, top + dh + 90 + dh / 2, pad + dw + gap - 12, top + dh + 90 + dh / 2);
+  await save('ground.png', F.c);
+}
+
+// =====================================================================
+// 8. ディテールパス
+// =====================================================================
+async function figDetail() {
+  const seed = 2026, W = 18, H = 12, C = 48;
+  const v = fullVillage(seed, W, H);
+  const r = makeR(W, H, C, seed, 2);
+  const fh = v.lj.solver.firstHouse, fx = fh % W, fy = (fh / W) | 0;
+  const cx0 = Math.max(0, Math.min(W - 5, fx - 2)), cy0 = Math.max(0, Math.min(H - 4, fy - 1)), cwn = 5, chn = 4;
+  const lx = cx0 * C, ly = cy0 * C, lw = cwn * C, lh = chn * C;
+  const dw = 380, dh = dw * lh / lw, gap = 22, pad = 28, top = 92;
+  const F = fig(pad * 2 + dw * 3 + gap * 2, top + dh + 130);
+  header(F, '06', 'Detail pass: same solver, 4×4 spots per cell', 'Per-spot domains and weights are derived from the finished layout.');
+  shot(r, sceneOf(v.lj, v.dj), { showDetails: false });
+  crop(F.x, r, lx, ly, lw, lh, pad, top, dw, dh, 10);
+  // 分類マップ
+  const info = V.spotInfo(v.mods, W, H);
+  const k = dw / lw, S = r.S;
+  crop(F.x, r, lx, ly, lw, lh, pad + dw + gap, top, dw, dh, 10);
+  const X2 = pad + dw + gap, { x } = F;
+  x.save(); rr(x, X2, top, dw, dh, 10); x.clip();
+  for (let gy = cy0 * SUB; gy < (cy0 + chn) * SUB; gy++) for (let gx = cx0 * SUB; gx < (cx0 + cwn) * SUB; gx++) {
+    const i = gy * info.SW + gx, g = info.ground[i];
+    let col = g === 1 ? 'rgba(217,176,122,0.78)' : g === 2 ? 'rgba(255,107,107,0.6)' : 'rgba(111,191,79,0.55)';
+    if (g === 0 && info.nearHouseSpot[i]) col = 'rgba(255,122,168,0.7)';
+    else if (g === 0 && info.nearHouseCell[((gy / SUB) | 0) * W + ((gx / SUB) | 0)]) col = 'rgba(255,205,110,0.55)';
+    x.fillStyle = col;
+    x.fillRect(X2 + (gx * S - lx) * k + 1, top + (gy * S - ly) * k + 1, S * k - 2, S * k - 2);
+  }
+  x.restore();
+  shot(r, sceneOf(v.lj, v.dj), { showDetails: true });
+  crop(F.x, r, lx, ly, lw, lh, pad + (dw + gap) * 2, top, dw, dh, 10);
+  const labels = ['layout pass only', 'spot classification (8px)', 'after detail pass'];
+  labels.forEach((t, i) => text(x, t, pad + i * (dw + gap), top + dh + 26, { size: 15, weight: 700 }));
+  const legend = [['rgba(111,191,79,0.9)', 'grass: tuft · bush · mushroom'], ['rgba(255,122,168,0.9)', 'next to house: flowers ×30'], ['rgba(255,205,110,0.9)', 'yard: fences allowed'], ['rgba(217,176,122,0.95)', 'dirt: empty / pebble'], ['rgba(255,107,107,0.9)', 'covered by sprite: empty only']];
+  let ly2 = top + dh + 52, lx2 = pad + dw + gap;
+  legend.forEach(([c, t], i) => {
+    const X = lx2 + (i % 2) * 200, Y = ly2 + ((i / 2) | 0) * 22;
+    x.fillStyle = c; rr(x, X, Y - 10, 12, 12, 3); x.fill();
+    text(x, t, X + 18, Y, { size: 12, color: MUTED });
+  });
+  text(x, 'Spots are 1 = dirt if they belong to a road arm, 2 = covered', pad, top + dh + 52, { size: 12, color: MUTED });
+  text(x, 'under houses/trees and the row they overhang.', pad, top + dh + 72, { size: 12, color: MUTED });
+  await save('detail.png', F.c);
+}
+
+// =====================================================================
+// 9. 柵のソケット
+// =====================================================================
+async function figFences() {
+  const S = 64, pad = 28, top = 92;
+  const rows = [
+    { seq: ['empty', 'fenceL', 'fenceM1', 'fenceM2', 'fenceR', 'empty'], ok: true, note: 'shortest legal fence: 4 spots' },
+    { seq: ['fenceL', 'fenceM1', 'fenceM2', 'fenceM1', 'fenceM2', 'fenceR'], ok: true, note: 'M2e–M1w loops the middle → any length 4, 6, 8 …' },
+    { seq: ['empty', 'fenceL', 'fenceM1', 'fenceR', 'empty', 'empty'], ok: false, note: 'M1e–Rw is not a pair → too short' },
+  ];
+  const rowH = S + 74;
+  const F = fig(pad * 2 + 6 * S + 360, top + rows.length * rowH + 40);
+  header(F, '07', 'Fence sockets enforce a grammar', 'Horizontal sockets form a chain L → M1 → M2 → (M1 → M2)* → R. N/S socket "x" only matches "o", so fences never stack.');
+  const r = new WFC.Renderer(document.createElement('canvas'));
+  r.S = S; r.C = S * 4; r.seed = 3;
+  const idx = k => DETAIL.findIndex(d => d.key === k);
+  rows.forEach((row, ri) => {
+    const Y = top + 10 + ri * rowH, { x } = F;
+    const g = x.createLinearGradient(0, Y, 0, Y + S);
+    g.addColorStop(0, '#78b04e'); g.addColorStop(1, '#5f9a3f');
+    x.fillStyle = g; rr(x, pad, Y, 6 * S, S, 8); x.fill();
+    row.seq.forEach((k, i) => {
+      const m = idx(k);
+      if (m > 0) r.drawDetail(x, m, pad + i * S, Y, 100 + i, 7 + ri);
+      x.strokeStyle = 'rgba(255,255,255,0.25)'; x.setLineDash([3, 3]);
+      x.strokeRect(pad + i * S, Y, S, S); x.setLineDash([]);
+      const sk = DETAIL[m].sockets;
+      text(x, k.replace('fence', ''), pad + i * S + S / 2, Y + S + 18, { align: 'center', size: 12, font: MONO, color: TEXT, weight: 600 });
+      text(x, `${sk[3]}|${sk[1]}`, pad + i * S + S / 2, Y + S + 36, { align: 'center', size: 10.5, font: MONO, color: MUTED });
+    });
+    if (!row.ok) { x.fillStyle = 'rgba(255,60,60,0.18)'; rr(x, pad, Y, 6 * S, S, 8); x.fill(); }
+    mark(x, row.ok, pad + 6 * S + 30, Y + S / 2, 14);
+    text(x, row.note, pad + 6 * S + 56, Y + S / 2 + 5, { size: 13.5, color: row.ok ? TEXT : BAD });
+  });
+  text(F.x, 'pairs: Le–M1w · M1e–M2w · M2e–Rw · M2e–M1w · o–o · o–x', pad, top + rows.length * rowH + 22, { size: 12.5, font: MONO, color: ACC });
+  await save('fences.png', F.c);
+}
+
+// =====================================================================
+// 10. 重みの効果
+// =====================================================================
+async function figWeights() {
+  const W = 12, H = 9, C = 32, seeds = 60;
+  const fam = m => LAYOUT[m].kind;
+  function stats() {
+    const cnt = { grass: 0, house: 0, tree: 0, road: 0 }; let tot = 0;
+    for (let s = 1; s <= seeds; s++) { const lj = new V.LayoutJob(s, W, H); lj.runToEnd(); for (const m of lj.modules()) { cnt[fam(m)]++; tot++; } }
+    for (const k in cnt) cnt[k] /= tot;
+    return cnt;
+  }
+  const orig = LAYOUT.map(m => m.weight);
+  const a = stats();
+  const lja = new V.LayoutJob(5, W, H); lja.runToEnd(); const modsA = lja.modules();
+  LAYOUT.forEach(m => { if (m.kind === 'road') m.weight = 1.6; });
+  const b = stats();
+  const ljb = new V.LayoutJob(5, W, H); ljb.runToEnd(); const modsB = ljb.modules();
+  LAYOUT.forEach((m, i) => { m.weight = orig[i]; });
+
+  const pad = 28, top = 92, tw = W * C, th = H * C;
+  const F = fig(pad * 2 + 430 + 2 * tw + 40, top + th + 80);
+  header(F, '08', 'Why road weights are scaled down', `Share of cells per family over ${seeds} seeds (12×9). 11 road pieces × house-sized weight = road soup.`);
+  const { x } = F;
+  const fams = [['grass', '#6fbf4f'], ['house', '#ff8a5c'], ['tree', '#2f9a55'], ['road', '#d9b07a']];
+  const groups = [['0.3 × shape (this project)', a, GOOD], ['every road = 1.6', b, BAD]];
+  groups.forEach(([title, st, col], gi) => {
+    const Y = top + 10 + gi * 150;
+    text(x, title, pad, Y + 12, { size: 14, weight: 700, color: col });
+    fams.forEach(([f, c], fi) => {
+      const yy = Y + 30 + fi * 26;
+      text(x, f, pad, yy + 12, { size: 12.5, font: MONO, color: MUTED });
+      x.fillStyle = 'rgba(255,255,255,0.06)'; rr(x, pad + 60, yy, 300, 16, 5); x.fill();
+      x.fillStyle = c; rr(x, pad + 60, yy, Math.max(4, 300 * st[f]), 16, 5); x.fill();
+      text(x, (st[f] * 100).toFixed(0) + '%', pad + 368, yy + 13, { size: 12.5, font: MONO });
+    });
+  });
+  const r = makeR(W, H, C, 5, 2);
+  shot(r, sceneMods(modsA), { showDetails: false });
+  const X1 = pad + 430;
+  crop(x, r, 0, 0, tw, th, X1, top + 10, tw, th, 10);
+  shot(r, sceneMods(modsB), { showDetails: false });
+  crop(x, r, 0, 0, tw, th, X1 + tw + 40, top + 10, tw, th, 10);
+  text(x, 'scaled (seed 5)', X1, top + th + 36, { size: 13, weight: 700, color: GOOD });
+  text(x, 'unscaled (seed 5)', X1 + tw + 40, top + th + 36, { size: 13, weight: 700, color: BAD });
+  await save('weights.png', F.c);
+}
+
+// =====================================================================
+// 11. 生成アニメーション GIF
+// =====================================================================
+async function figGif() {
+  const seed = 7, W = 12, H = 9, C = 40;
+  const r = makeR(W, H, C, seed, 1);
+  const gif = GIFEncoder();
+  const ctx = r.canvas.getContext('2d', { willReadFrequently: true });
+  // 共有パレット: オーバーレイ付きの序盤と、完成形の両方から色を集める
+  const grab = () => ctx.getImageData(0, 0, r.canvas.width, r.canvas.height).data;
+  {
+    const lj0 = new V.LayoutJob(seed, W, H);
+    shot(r, sceneOf(lj0)); const a = grab();
+    lj0.runToEnd();
+    const dj0 = new V.DetailJob(lj0.modules(), W, H, lj0.solver.firstHouse, seed * 31 + 7); dj0.runToEnd();
+    shot(r, sceneOf(lj0, dj0)); const b = grab();
+    const both = new Uint8ClampedArray(a.length + b.length); both.set(a); both.set(b, a.length);
+    var palette = quantize(both, 255);
+    palette.push([255, 0, 255]); // 透明色用
+  }
+  const TI = palette.length - 1;
+  let prev = null, first = true;
+  // 前フレームと同じピクセルは透明にする（差分だけを書くので LZW がよく縮む）
+  const add = (delay) => {
+    const data = grab(), { width, height } = r.canvas;
+    const idx = applyPalette(data, palette.slice(0, TI));
+    const out = new Uint8Array(idx);
+    if (prev) for (let i = 0; i < idx.length; i++) if (idx[i] === prev[i]) out[i] = TI;
+    prev = idx;
+    // dispose: 1 = 前のフレームを残したまま重ねる
+    if (first) { gif.writeFrame(out, width, height, { palette, delay, dispose: 1 }); first = false; }
+    else gif.writeFrame(out, width, height, { delay, transparent: true, transparentIndex: TI, dispose: 1 });
+  };
+  const lj = new V.LayoutJob(seed, W, H);
+  shot(r, sceneOf(lj), { highlight: hl(r, lj.solver.last.cell, W) }); add(700);
+  let n = 1;
+  for (;;) {
+    const st = lj.step();
+    if (st === 'done' || st === 'failed') break;
+    if (st !== 'picked') continue;
+    shot(r, sceneOf(lj), { highlight: hl(r, lj.solver.last.cell, W) }); add(110); n++;
+  }
+  const mods = lj.modules();
+  const dj = new V.DetailJob(mods, W, H, lj.solver.firstHouse, seed * 31 + 7);
+  // ディテールパスの総手数を数えて 14 コマに間引く
+  const tmp = new V.DetailJob(mods, W, H, lj.solver.firstHouse, seed * 31 + 7); tmp.runToEnd();
+  const every = Math.max(1, Math.ceil(tmp.solver.steps / 14));
+  shot(r, sceneOf(lj, dj), { spotGrid: true }); add(500);
+  for (;;) {
+    const st = dj.step();
+    if (st === 'done' || st === 'failed') break;
+    if (dj.solver.steps % every === 0) { shot(r, sceneOf(lj, dj), { spotGrid: true }); add(90); n++; }
+  }
+  shot(r, sceneOf(lj, dj)); add(2600);
+  gif.finish();
+  log(`gif frames: ${n}`);
+  await save('generation.gif', new Blob([gif.bytes()], { type: 'image/gif' }));
+}
+
+// ---------- 実行 ----------
+await document.fonts.load(`800 24px Fraunces`);
+await document.fonts.load(`600 12px "JetBrains Mono"`);
+await document.fonts.load(`700 14px "Zen Kaku Gothic New"`);
+await document.fonts.ready;
+if (new URLSearchParams(location.search).has('run')) {
+  const only = new URLSearchParams(location.search).get('only');
+  const all = { figHero, figGallery, figModules, figAdjacency, figSteps, figOverlays, figGround, figDetail, figFences, figWeights, figGif };
+  for (const [k, f] of Object.entries(all)) {
+    if (only && !only.split(',').includes(k)) continue;
+    try { log('… ' + k); await f(); } catch (e) { log('✘ ' + k + ': ' + e.stack); }
+  }
+  log('DONE');
+}
+</script>
+</body>
+</html>

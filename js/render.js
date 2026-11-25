@@ -54,11 +54,11 @@
       this.lastEmit = 0;
     }
 
-    setup(W, H, C, seed) {
+    setup(W, H, C, seed, dpr) {
       this.W = W; this.H = H; this.C = C; this.seed = seed;
       this.S = C / SUB;
       this.cw = W * C; this.ch = H * C;
-      this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+      this.dpr = dpr || Math.min(window.devicePixelRatio || 1, 2);
       const c = this.canvas;
       c.width = Math.round(this.cw * this.dpr); c.height = Math.round(this.ch * this.dpr);
       c.style.aspectRatio = `${this.cw} / ${this.ch}`;
@@ -221,16 +221,24 @@
 
     drawLayoutOverlay(ctx, s, mode) {
       const { W, H, C } = this;
-      const maxE = Math.log(LAYOUT.length);
+      // 未確定セルの中で正規化して、色の差を見やすくする
+      let eMin = Infinity, eMax = -Infinity;
+      for (let i = 0; i < W * H; i++) {
+        if (s.decided[i]) continue;
+        const e = s.entropyOf(i);
+        if (e < eMin) eMin = e;
+        if (e > eMax) eMax = e;
+      }
+      const span = Math.max(1e-6, eMax - eMin);
       for (let i = 0; i < W * H; i++) {
         if (s.decided[i]) continue;
         const x = (i % W) * C, y = ((i / W) | 0) * C;
         const dom = s.domains[i];
         const e = s.entropyOf(i);
-        const t = clamp(e / maxE, 0, 1);
+        const t = clamp((e - eMin) / span, 0, 1);
         if (mode === 'entropy') {
           // 低エントロピー = 暖色、高 = 寒色
-          const hue = 220 - t * 0 - (1 - t) * 190;
+          const hue = 220 - (1 - t) * 190;
           ctx.fillStyle = `hsla(${hue},70%,${22 + (1 - t) * 18}%,0.88)`;
           ctx.fillRect(x, y, C, C);
           ctx.fillStyle = 'rgba(255,255,255,0.9)';
@@ -239,7 +247,7 @@
           ctx.fillText(e.toFixed(2), x + C / 2, y + C / 2 - C * 0.08);
           ctx.fillStyle = 'rgba(255,255,255,0.55)';
           ctx.font = `${Math.round(C * 0.18)}px "JetBrains Mono", ui-monospace, monospace`;
-          ctx.fillText(WFC.popcount(dom) + '択', x + C / 2, y + C / 2 + C * 0.2);
+          ctx.fillText(WFC.popcount(dom) + (this.optSuffix ?? '択'), x + C / 2, y + C / 2 + C * 0.2);
         } else {
           const g = ctx.createLinearGradient(x, y, x, y + C);
           g.addColorStop(0, 'rgba(24,28,44,0.90)'); g.addColorStop(1, 'rgba(16,19,32,0.94)');
